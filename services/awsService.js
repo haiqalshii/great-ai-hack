@@ -70,35 +70,144 @@ async function uploadToS3(buffer, key, contentType = "image/png") {
 
 // Generate image using Titan Image Generator G1
 async function generateImage(prompt) {
+  console.log("🎨 Starting image generation with prompt:", prompt);
+  
   const input = {
-    modelId: "amazon.titan-image-generator-g1:latest",
+    modelId: "amazon.titan-image-generator-v1:0", // Try this model ID instead
     contentType: "application/json",
     accept: "application/json",
     body: JSON.stringify({
-      prompt: prompt,
-      width: 512,
-      height: 512,
-      quality: "high"
+      taskType: "TEXT_IMAGE", // Add task type
+      textToImageParams: {
+        text: prompt,
+        negativeText: "blurry, low quality, distorted" // Optional negative prompt
+      },
+      imageGenerationConfig: {
+        numberOfImages: 1,
+        height: 512,
+        width: 512,
+        cfgScale: 8.0, // Guidance scale
+        seed: Math.floor(Math.random() * 1000000) // Random seed
+      }
     })
   };
 
-  const command = new InvokeModelCommand(input);
-  const response = await bedrockClient.send(command);
+  console.log("📤 Sending request to Bedrock:", JSON.stringify(input, null, 2));
 
-  const decoded = new TextDecoder().decode(response.body);
-  let responseBody;
   try {
-    responseBody = JSON.parse(decoded);
-  } catch (e) {
-    console.error("Titan returned non-JSON:", decoded);
-    throw new Error("Malformed response from Titan Image Generator");
-  }
+    const command = new InvokeModelCommand(input);
+    const response = await bedrockClient.send(command);
 
-  if (responseBody.artifacts && responseBody.artifacts[0] && responseBody.artifacts[0].base64) {
-    return Buffer.from(responseBody.artifacts[0].base64, "base64");
-  }
+    console.log("📥 Raw response received, body length:", response.body.length);
 
-  throw new Error("No image returned from Titan");
+    const decoded = new TextDecoder().decode(response.body);
+    console.log("🔍 Decoded response:", decoded.substring(0, 200) + "...");
+
+    let responseBody;
+    try {
+      responseBody = JSON.parse(decoded);
+      console.log("✅ Successfully parsed JSON response");
+    } catch (e) {
+      console.error("❌ Failed to parse JSON:", e.message);
+      console.error("Raw response:", decoded);
+      throw new Error("Malformed response from Titan Image Generator");
+    }
+
+    console.log("📋 Response structure:", Object.keys(responseBody));
+
+    // Check different possible response structures
+    if (responseBody.images && responseBody.images[0]) {
+      console.log("✅ Found image in 'images' array");
+      return Buffer.from(responseBody.images[0], "base64");
+    } else if (responseBody.artifacts && responseBody.artifacts[0] && responseBody.artifacts[0].base64) {
+      console.log("✅ Found image in 'artifacts' array");
+      return Buffer.from(responseBody.artifacts[0].base64, "base64");
+    } else if (responseBody.image) {
+      console.log("✅ Found image in 'image' field");
+      return Buffer.from(responseBody.image, "base64");
+    } else {
+      console.error("❌ No image found in response");
+      console.error("Full response:", JSON.stringify(responseBody, null, 2));
+      throw new Error("No image data found in Titan response");
+    }
+
+  } catch (error) {
+    console.error("❌ Error during image generation:", error);
+    
+    // Check if it's a model access issue
+    if (error.message && error.message.includes("AccessDeniedException")) {
+      throw new Error("Access denied to Titan Image Generator. Please check model access in AWS Bedrock console.");
+    }
+    
+    // Check if it's a region issue
+    if (error.message && error.message.includes("ValidationException")) {
+      throw new Error("Model validation failed. Check if the model is available in your region (us-east-1).");
+    }
+    
+    throw error;
+  }
+}
+
+// Alternative function to try different model versions
+async function generateImageFallback(prompt) {
+  const models = [
+    "amazon.titan-image-generator-v1:0",
+    "amazon.titan-image-generator-g1:latest",
+    "stability.stable-diffusion-xl-base-v1-0" // Alternative model
+  ];
+
+  for (const modelId of models) {
+    try {
+      console.log(`🔄 Trying model: ${modelId}`);
+      
+      const input = {
+        modelId: modelId,
+        contentType: "application/json",
+        accept: "application/json",
+        body: JSON.stringify(
+          modelId.includes("stability") ? {
+            // Stable Diffusion format
+            text_prompts: [{ text: prompt }],
+            cfg_scale: 10,
+            seed: 0,
+            steps: 50,
+            width: 512,
+            height: 512
+          } : {
+            // Titan format
+            taskType: "TEXT_IMAGE",
+            textToImageParams: { text: prompt },
+            imageGenerationConfig: {
+              numberOfImages: 1,
+              height: 512,
+              width: 512,
+              cfgScale: 8.0
+            }
+          }
+        )
+      };
+
+      const command = new InvokeModelCommand(input);
+      const response = await bedrockClient.send(command);
+      const decoded = new TextDecoder().decode(response.body);
+      const responseBody = JSON.parse(decoded);
+
+      // Handle different response formats
+      if (responseBody.images && responseBody.images[0]) {
+        return Buffer.from(responseBody.images[0], "base64");
+      } else if (responseBody.artifacts && responseBody.artifacts[0]) {
+        return Buffer.from(responseBody.artifacts[0].base64, "base64");
+      } else if (responseBody.image) {
+        return Buffer.from(responseBody.image, "base64");
+      }
+      
+    } catch (error) {
+      console.log(`❌ Failed with ${modelId}:`, error.message);
+      continue;
+    }
+  }
+  
+  throw new Error("All image generation models failed");
 }
 
 
